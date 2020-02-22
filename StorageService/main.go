@@ -13,7 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	news "testovoe/Proto/News"
+	news "nats-golang-test/Proto/News"
 	"time"
 )
 

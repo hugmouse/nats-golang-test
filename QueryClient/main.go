@@ -14,7 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	news "testovoe/Proto/News"
+	news "nats-golang-test/Proto/News"
 	"time"
 )
 

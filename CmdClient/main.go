@@ -9,7 +9,7 @@ import (
 	"github.com/savsgio/atreugo"
 	"github.com/valyala/fasthttp"
 	"log"
-	news "testovoe/Proto/News"
+	news "nats-golang-test/Proto/News"
 	"time"
 )
 
