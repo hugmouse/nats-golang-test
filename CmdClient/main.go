@@ -25,6 +25,7 @@ const htmlTemplate string = `
 
 func main() {
 	ConfigPtr := flag.String("config", "../Config/config.ini", "Path to configuration file")
+	flag.Parse()
 	cfg, err := ini.Load(*ConfigPtr)
 	if err != nil {
 		log.Fatal(err)
