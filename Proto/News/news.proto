@@ -1,0 +1,11 @@
+syntax="proto3";
+
+package news;
+
+import "google/protobuf/timestamp.proto";
+
+message News {
+    string title = 1;
+    google.protobuf.Timestamp date = 2;
+    string uniqueID = 3;
+}
