@@ -4,13 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"github.com/go-ini/ini"
-	"github.com/gogo/protobuf/proto"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/stan.go"
 	"github.com/savsgio/atreugo"
 	"github.com/valyala/fasthttp"
 	"log"
-	news "nats-golang-test/Proto/News"
-	"time"
+	"strings"
 )
 
 const htmlTemplate string = `
@@ -26,6 +25,7 @@ const htmlTemplate string = `
 func main() {
 	ConfigPtr := flag.String("config", "../Config/config.ini", "Path to configuration file")
 	flag.Parse()
+
 	cfg, err := ini.Load(*ConfigPtr)
 	if err != nil {
 		log.Fatal(err)
@@ -33,7 +33,7 @@ func main() {
 
 	// Соединение с NATS
 	nc, err := nats.Connect(
-		cfg.Section("NATS").Key("ip").String()+":"+
+		cfg.Section("NATS").Key("ip").String() + ":" +
 			cfg.Section("NATS").Key("port").String())
 	if err != nil {
 		log.Fatal(err)
@@ -45,40 +45,31 @@ func main() {
 	}
 	server := atreugo.New(config)
 
+	// Соединение с NATS Streaming
+	sc, err := stan.Connect("test-cluster", "CmdClient", stan.NatsConn(nc))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sc.Close()
+
+	thisChannelIsUseless := make(chan string, 1)
+
+	sc.Subscribe("get.news.additional", func(msg *stan.Msg) {
+		thisChannelIsUseless <- string(msg.Data)
+	})
+
 	// Получает новость по уникальному идентификатору
 	server.GET("/news/get/:uniqueID", func(ctx *atreugo.RequestCtx) error {
 
-		payload, err := proto.Marshal(&news.News{
-			UniqueID: ctx.UserValue("uniqueID").(string),
-		})
-
+		err = sc.Publish("get.news", []byte(ctx.UserValue("uniqueID").(string)))
 		if err != nil {
-			_ = ctx.ErrorResponse(err, 500)
-			return err
+			ctx.ErrorResponse(err, fasthttp.StatusInternalServerError)
 		}
 
-		msg, err := nc.Request("get.news", payload, 3*time.Second)
-		if err != nil {
-			_ = ctx.ErrorResponse(err, 500)
-			return err
-		}
+		s := strings.Split(<-thisChannelIsUseless, ",")
 
-		newsget := &news.News{}
-		if len(msg.Data) == 0 {
-			_ = ctx.ErrorResponse(fmt.Errorf("no info was returned from storage"), 500)
-			return err
-		}
+		return ctx.HTTPResponse(fmt.Sprintf(htmlTemplate, s[0], s[1], s[2]))
 
-		err = proto.Unmarshal(msg.Data, newsget)
-		if err != nil {
-			_ = ctx.ErrorResponse(err, 500)
-			return err
-		}
-
-		return ctx.HTTPResponse(fmt.Sprintf(htmlTemplate,
-			newsget.GetTitle(),
-			time.Unix(newsget.GetDate().Seconds, 0),
-			newsget.GetUniqueID()), fasthttp.StatusOK)
 	})
 
 	if err := server.ListenAndServe(); err != nil {

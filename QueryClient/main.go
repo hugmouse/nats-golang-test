@@ -7,6 +7,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes/timestamp"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/stan.go"
 	"github.com/savsgio/atreugo"
 	"github.com/valyala/fasthttp"
 	"log"
@@ -38,19 +39,37 @@ func main() {
 
 	// Соединение с NATS
 	nc, err := nats.Connect(
-		cfg.Section("NATS").Key("ip").String()+":"+
+		cfg.Section("NATS").Key("ip").String() + ":" +
 			cfg.Section("NATS").Key("port").String())
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer nc.Close()
 
+	// Соединение с NATS Streaming
+	sc, err := stan.Connect("test-cluster", "QueryClient", stan.NatsConn(nc))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sc.Close()
+
 	config := atreugo.Config{
-		Addr: cfg.Section("QueryClient").Key("ip").String()+":"+cfg.Section("QueryClient").Key("port").String(),
+		Addr: cfg.Section("QueryClient").Key("ip").String() + ":" + cfg.Section("QueryClient").Key("port").String(),
 	}
 	server := atreugo.New(config)
 
 	reg, err := regexp.Compile("[^a-zA-Z0-9\\s]+")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	uselessChannel := make(chan string, 1)
+
+	_, err = sc.Subscribe("created.news.additional", func(msg *stan.Msg) {
+		if msg.Data != nil {
+			uselessChannel <- string(msg.Data)
+		}
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -74,7 +93,7 @@ func main() {
 			Date: &timestamp.Timestamp{
 				Seconds: timeNow,
 			},
-			UniqueID: "ID" + title + strconv.Itoa(rand.Intn(10000)),
+			UniqueID: title + "-" + strconv.Itoa(rand.Intn(10000)),
 		}
 
 		data, err := proto.Marshal(CreatedNews)
@@ -83,15 +102,10 @@ func main() {
 			return err
 		}
 
-		response, err := nc.Request("create.news", data, 3*time.Second)
+		err = sc.Publish("create.news", data)
 		if err != nil {
 			_ = ctx.ErrorResponse(err, fasthttp.StatusGatewayTimeout)
 			return err
-		}
-
-		err = proto.Unmarshal(response.Data, CreatedNews)
-		if err != nil {
-			_ = ctx.ErrorResponse(err, fasthttp.StatusInternalServerError)
 		}
 
 		return ctx.HTTPResponse(fmt.Sprintf(htmlTemplate,

@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"github.com/go-ini/ini"
 	"github.com/golang/protobuf/proto"
-	"github.com/golang/protobuf/ptypes/timestamp"
 	_ "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/stan.go"
 	"log"
 	"os"
 	"os/signal"
@@ -33,7 +33,7 @@ func main() {
 		cfg.Section("Database").Key("port").String(),
 		cfg.Section("Database").Key("dbname").String(),
 		cfg.Section("Database").Key("sslmode").String(),
-		)
+	)
 
 	// Подключение к базе данных
 	db, err := sql.Open("postgres", DatabaseConnectionString)
@@ -49,79 +49,71 @@ func main() {
 
 	// Соединение с NATS (ip:port)
 	nc, err := nats.Connect(
-		cfg.Section("NATS").Key("ip").String()+":"+
+		cfg.Section("NATS").Key("ip").String() + ":" +
 			cfg.Section("NATS").Key("port").String())
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer nc.Close()
 
-	// Подписка на создание новостей
-	nc.Subscribe("create.news", func(msg *nats.Msg) {
-		newscreate := &news.News{}
-		err = proto.Unmarshal(msg.Data, newscreate)
+	// Соединение с NATS Streaming
+	sc, err := stan.Connect(cfg.Section("NATSStreaming").Key("clusterID").String(), "StorageService", stan.NatsConn(nc))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sc.Close()
+
+	_, err = sc.Subscribe("get.news", func(msg *stan.Msg) {
+
+		var (
+			title, uniqueID string
+			dat             time.Time
+		)
+
+		err := db.QueryRow("SELECT title, published, uniqueID FROM news WHERE uniqueid = $1", string(msg.Data)).Scan(&title, &dat, &uniqueID)
 		if err != nil {
-			log.Println("marshaling error: ", err)
-			_ = msg.Respond([]byte(err.Error()))
+			log.Fatal(err)
 			return
 		}
 
-		// Кидаем новость с данными о заголовке, времени публикации и уникальном идентификаторе
-		// По сути было бы классно это делать в отдельном потоке
-		// Но вроде не так уж и страшно
-		if _, err := db.Exec(
-			"INSERT INTO news (title, published, uniqueID) VALUES ($1, $2::INTEGER::TIMESTAMP, $3)",
-			newscreate.GetTitle(), newscreate.GetDate().Seconds, newscreate.GetUniqueID()); err != nil {
-			_ = msg.Respond([]byte(err.Error()))
+		err = sc.Publish("get.news.additional", []byte(
+			fmt.Sprintf("%s,%s,%s",
+				title, dat.Format(time.RFC822Z), uniqueID)))
+		if err != nil {
+			log.Println(err)
+		}
+	})
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sc.Subscribe("create.news", func(msg *stan.Msg) {
+		var newscreate news.News
+
+		err = proto.Unmarshal(msg.Data, &newscreate)
+		if err != nil {
 			log.Println(err)
 			return
 		}
 
-		// QueryClient ожидает ответа, поэтому мы должны его отдать
-		response, err := proto.Marshal(newscreate)
-		if err != nil {
-			log.Println("marshaling error: ", err)
-			_ = msg.Respond([]byte(err.Error()))
+		if _, err := db.Exec(
+			"INSERT INTO news (title, published, uniqueID) VALUES ($1, $2::INTEGER::TIMESTAMP, $3)",
+			newscreate.GetTitle(), newscreate.GetDate().Seconds, newscreate.GetUniqueID()); err != nil {
 			return
 		}
 
-		_ = msg.Respond(response)
+		err = sc.Publish("create.news.additional", []byte(
+			fmt.Sprintf("%s,%s,%s",
+				newscreate.GetTitle(), time.Unix(newscreate.GetDate().Seconds, 0), newscreate.UniqueID)))
+		if err != nil {
+			log.Println(err)
+		}
 	})
 
-	// Подписка на получение новостей
-	nc.Subscribe("get.news", func(msg *nats.Msg) {
-		var (
-			title    string
-			datetime time.Time
-			uniqueID string
-		)
-
-		newsget := &news.News{}
-		err = proto.Unmarshal(msg.Data, newsget)
-		if err != nil {
-			_ = msg.Respond([]byte(err.Error()))
-			log.Fatal("marshaling error: ", err)
-		}
-
-		err := db.QueryRow("SELECT title, published, uniqueID FROM news WHERE uniqueid = $1", newsget.GetUniqueID()).Scan(&title, &datetime, &uniqueID)
-		if err != nil {
-			_ = msg.Respond([]byte(err.Error()))
-			// log.Fatal(err)
-			return
-		}
-
-		newsget.Title = title
-		newsget.UniqueID = uniqueID
-		newsget.Date = &timestamp.Timestamp{Seconds: datetime.Unix()}
-
-		b, err := proto.Marshal(newsget)
-		if err != nil {
-			_ = msg.Respond([]byte(err.Error()))
-			log.Fatal(err)
-		}
-
-		_ = msg.Respond(b)
-	})
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
